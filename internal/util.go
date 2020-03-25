@@ -5,18 +5,25 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/api/core"
+	"go.opentelemetry.io/otel/api/global"
+	"go.opentelemetry.io/otel/api/trace"
+	"google.golang.org/grpc/codes"
 )
 
 func Sleep(ctx context.Context, dur time.Duration) error {
-	t := time.NewTimer(dur)
-	defer t.Stop()
+	return WithSpan(ctx, "sleep", func(ctx context.Context, span trace.Span) error {
+		t := time.NewTimer(dur)
+		defer t.Stop()
 
-	select {
-	case <-t.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+		select {
+		case <-t.C:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
 }
 
 func MakeSliceNextElemFunc(v reflect.Value) func() reflect.Value {
@@ -99,4 +106,32 @@ func Unwrap(err error) error {
 		return nil
 	}
 	return u.Unwrap()
+}
+
+var (
+	logTypeKey    = core.Key("log.type")
+	logMessageKey = core.Key("log.message")
+)
+
+func WithSpan(
+	ctx context.Context,
+	name string,
+	fn func(context.Context, trace.Span) error,
+) error {
+	if !trace.SpanFromContext(ctx).IsRecording() {
+		return fn(ctx, trace.NoopSpan{})
+	}
+
+	ctx, span := global.TraceProvider().Tracer("go-pg").Start(ctx, name)
+	defer span.End()
+
+	if err := fn(ctx, span); err != nil {
+		span.SetStatus(codes.Internal, err.Error())
+		span.AddEvent(ctx, "error",
+			logTypeKey.String(reflect.TypeOf(err).String()),
+			logMessageKey.String(err.Error()),
+		)
+		return err
+	}
+	return nil
 }
